@@ -1,0 +1,20 @@
+# Example oci-to-wsl profile
+#
+# This file can be passed to oci-to-wsl with:
+#   oci-to-wsl --profile example-profile.yaml
+
+# WSL distribution name (must be unique on this machine).
+name: my-ubuntu
+
+# OCI image reference.  Any registry that requires authentication will be
+# handled automatically – Azure Container Registry images trigger a browser
+# login via Azure AD device-code flow.
+image: ubuntu:22.04
+
+# Where to store the WSL virtual disk.  Defaults to .\<name> when omitted.
+install_dir: C:\WSL\my-ubuntu
+
+# Optional: shell commands to run inside the new WSL instance after import.
+init_cmds:
+  - apt-get update -y
+  - apt-get install -y curl git vim
