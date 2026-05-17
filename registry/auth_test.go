@@ -26,26 +26,36 @@ func TestIsACR(t *testing.T) {
 	}
 }
 
-func TestOpenBrowser_IgnoresNonMicrosoftURL(t *testing.T) {
-	// openBrowser with a non-Microsoft URL must not panic and must be a no-op.
-	// (We just call it and ensure no panic; we cannot test process spawning here.)
-	openBrowser("https://evil.example.com/malicious")
+// TestAADScope verifies the scope constant required for ACR token exchange.
+func TestAADScope(t *testing.T) {
+	if !strings.Contains(aadScope, "management.azure.com") {
+		t.Errorf("aadScope %q does not contain management.azure.com", aadScope)
+	}
 }
 
-func TestOpenBrowser_IgnoresInvalidURL(t *testing.T) {
-	openBrowser("://invalid")
+// TestACRAuthenticatorAuthorization confirms the sentinel username/password
+// format expected by ACR.
+func TestACRAuthenticatorAuthorization(t *testing.T) {
+	a := &acrAuthenticator{accessToken: "test-token"}
+	cfg, err := a.Authorization()
+	if err != nil {
+		t.Fatalf("Authorization: unexpected error: %v", err)
+	}
+	if cfg.Username != "00000000-0000-0000-0000-000000000000" {
+		t.Errorf("Username: got %q, want sentinel UUID", cfg.Username)
+	}
+	if cfg.Password != "test-token" {
+		t.Errorf("Password: got %q, want %q", cfg.Password, "test-token")
+	}
 }
 
-func TestOpenBrowser_IgnoresHTTPURL(t *testing.T) {
-	// http (not https) to a Microsoft domain is silently accepted by our validator,
-	// but we cover it to make sure there is no panic.
-	openBrowser("http://login.microsoftonline.com/deviceauth")
-}
-
-// TestACRScopeContainsManagement verifies the scope constant used for ACR auth
-// includes the management plane URL, which is required for the device flow.
-func TestACRScopeContainsManagement(t *testing.T) {
-	if !strings.Contains(acrScope, "management.azure.com") {
-		t.Errorf("acrScope %q does not contain management.azure.com", acrScope)
+// TestNewAzureCredential ensures the credential chain builds without error in
+// both the empty-tenant and explicit-tenant cases.
+func TestNewAzureCredential(t *testing.T) {
+	if _, err := newAzureCredential(""); err != nil {
+		t.Errorf("newAzureCredential(\"\"): unexpected error: %v", err)
+	}
+	if _, err := newAzureCredential("00000000-0000-0000-0000-000000000000"); err != nil {
+		t.Errorf("newAzureCredential(tenant): unexpected error: %v", err)
 	}
 }

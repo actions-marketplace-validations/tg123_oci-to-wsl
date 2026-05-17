@@ -17,8 +17,9 @@ import (
 type PullOptions struct {
 	// Authenticator is used for registry authentication.
 	// If nil, the default keychain (docker config, env vars) is used unless
-	// the registry is detected as Azure Container Registry, in which case the
-	// device-code AAD flow runs automatically.
+	// the registry is detected as Azure Container Registry, in which case
+	// the Azure SDK credential chain (az CLI + interactive browser) runs
+	// automatically.
 	Authenticator authn.Authenticator
 
 	// Platform selects a specific OS/arch from a multi-arch manifest list.
@@ -74,7 +75,7 @@ func buildCraneOptions(ref name.Reference, platform *v1.Platform, opts PullOptio
 	// Auto-detect ACR registries and use browser-based auth.
 	registry := ref.Context().RegistryStr()
 	if isACR(registry) {
-		fmt.Printf("Detected ACR registry %s – initiating browser login ...\n", registry)
+		fmt.Printf("Detected ACR registry %s – authenticating via Azure SDK ...\n", registry)
 		auth, err := NewACRAuthenticator(registry, opts.Tenant)
 		if err != nil {
 			// Fall through to default keychain; the error will surface during pull.

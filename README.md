@@ -10,7 +10,7 @@ Load an OCI container-registry image directly into a **Windows Subsystem for Lin
 | OCI image pull | Uses [go-containerregistry](https://github.com/google/go-containerregistry) (`crane`) to pull and flatten any OCI image into a rootfs tar |
 | WSL import | Calls `wsl.exe --import` automatically |
 | YAML profiles | Describe the image, install path, and post-install commands in a reusable file |
-| ACR support | **Azure Container Registry** (*.azurecr.io / *.azurecr.cn / *.azurecr.us) is detected automatically; a browser-based Azure AD device-code login is triggered without any pre-configuration |
+| ACR support | **Azure Container Registry** (*.azurecr.io / *.azurecr.cn / *.azurecr.us) is detected automatically; the official Azure SDK for Go (`azidentity`) handles a cached `az login` session first, then falls back to an interactive browser sign-in |
 
 ## Quick start
 
@@ -48,15 +48,13 @@ GOOS=windows GOARCH=amd64 go build -o oci-to-wsl.exe .
 
 ## How ACR authentication works
 
-When the image reference points to an Azure Container Registry endpoint, `oci-to-wsl`:
+ACR auth is delegated to the official [Azure SDK for Go](https://github.com/Azure/azure-sdk-for-go):
 
-1. Requests a **device code** from Azure AD (`login.microsoftonline.com`).
-2. Prints the verification URL and code, and attempts to open the browser automatically.
-3. Polls until you complete the sign-in flow.
-4. Exchanges the AAD access token for an **ACR refresh token** via the registry's `/oauth2/exchange` endpoint.
-5. Obtains a scoped **ACR access token** and uses it for the image pull.
+1. **`azidentity.AzureCLICredential`** – if you have already run `az login`, the cached token is reused with no prompting.
+2. **`azidentity.InteractiveBrowserCredential`** – otherwise, the default browser is opened for sign-in (no device-code copy/paste required).
+3. The resulting AAD token is exchanged for a scoped ACR access token via `azcontainerregistry.AuthenticationClient`.
 
-No credentials are stored on disk.
+No credentials are stored on disk by this tool.
 
 ## CLI flags
 
