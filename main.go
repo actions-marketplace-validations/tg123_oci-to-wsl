@@ -1,10 +1,12 @@
 package main
 
 import (
-	"flag"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/urfave/cli/v3"
 
 	"github.com/tg123/oci-to-wsl/config"
 	"github.com/tg123/oci-to-wsl/registry"
@@ -12,32 +14,68 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	cmd := &cli.Command{
+		Name:  "oci-to-wsl",
+		Usage: "load an OCI container image into a WSL distribution",
+		Description: `Pull an OCI image from any container registry and import it as a
+WSL distribution in one command.
+
+Examples:
+  # Import directly from Docker Hub
+  oci-to-wsl --image ubuntu:22.04 --name my-ubuntu
+
+  # Import from Azure Container Registry (browser login triggered automatically)
+  oci-to-wsl --image myacr.azurecr.io/myimage:latest --name myimage
+
+  # Use a YAML profile
+  oci-to-wsl --profile ubuntu.yaml`,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "profile",
+				Usage: "path to a YAML profile file (overrides other flags when set)",
+			},
+			&cli.StringFlag{
+				Name:  "image",
+				Usage: "OCI image reference, e.g. ubuntu:22.04 or myacr.azurecr.io/myimage:latest",
+			},
+			&cli.StringFlag{
+				Name:  "name",
+				Usage: "WSL distribution name to create",
+			},
+			&cli.StringFlag{
+				Name:  "dir",
+				Usage: "directory to store the WSL virtual disk (default: ./<name>)",
+			},
+			&cli.StringFlag{
+				Name:  "platform",
+				Usage: "image platform to pull, e.g. linux/amd64 or linux/arm64 (default: host)",
+			},
+			&cli.StringFlag{
+				Name:  "tenant",
+				Usage: "Azure AD tenant id for ACR auth (required when signed-in as a guest in the ACR's tenant)",
+			},
+			&cli.StringFlag{
+				Name:  "save-tar",
+				Usage: "write the exported rootfs tar to this path and skip 'wsl --import' (useful on non-Windows hosts)",
+			},
+		},
+		Action: action,
+	}
+
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	var (
-		profilePath string
-		imageName   string
-		distroName  string
-		installDir  string
-		platform    string
-		tenant      string
-		saveTar     string
-	)
-
-	flag.StringVar(&profilePath, "profile", "", "Path to a YAML profile file (overrides other flags when set)")
-	flag.StringVar(&imageName, "image", "", "OCI image reference, e.g. ubuntu:22.04 or myacr.azurecr.io/myimage:latest")
-	flag.StringVar(&distroName, "name", "", "WSL distribution name to create")
-	flag.StringVar(&installDir, "dir", "", "Directory to store the WSL virtual disk (default: ./<name>)")
-	flag.StringVar(&platform, "platform", "", "Image platform to pull, e.g. linux/amd64 or linux/arm64 (default: host)")
-	flag.StringVar(&tenant, "tenant", "", "Azure AD tenant id for ACR auth (required when signed-in as a guest in the ACR's tenant)")
-	flag.StringVar(&saveTar, "save-tar", "", "Write the exported rootfs tar to this path and skip 'wsl --import' (useful on non-Windows hosts)")
-	flag.Usage = usage
-	flag.Parse()
+func action(_ context.Context, cmd *cli.Command) error {
+	profilePath := cmd.String("profile")
+	imageName := cmd.String("image")
+	distroName := cmd.String("name")
+	installDir := cmd.String("dir")
+	platform := cmd.String("platform")
+	tenant := cmd.String("tenant")
+	saveTar := cmd.String("save-tar")
 
 	// Build a Profile from the YAML file or the CLI flags.
 	var profile *config.Profile
@@ -49,11 +87,11 @@ func run() error {
 		}
 	} else {
 		if imageName == "" {
-			flag.Usage()
+			_ = cli.ShowAppHelp(cmd)
 			return fmt.Errorf("provide --profile, or --image (and --name unless --save-tar is set)")
 		}
 		if distroName == "" && saveTar == "" {
-			flag.Usage()
+			_ = cli.ShowAppHelp(cmd)
 			return fmt.Errorf("--name is required unless --save-tar is set")
 		}
 		profile = &config.Profile{
@@ -144,9 +182,9 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 	fmt.Printf("WSL distribution %q created successfully.\n", profile.Name)
 
 	// Run any post-creation initialisation commands.
-	for _, cmd := range profile.InitCmds {
-		if err := wsl.RunCommand(profile.Name, cmd); err != nil {
-			return fmt.Errorf("init command %q failed: %w", cmd, err)
+	for _, c := range profile.InitCmds {
+		if err := wsl.RunCommand(profile.Name, c); err != nil {
+			return fmt.Errorf("init command %q failed: %w", c, err)
 		}
 	}
 
@@ -154,35 +192,4 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 		fmt.Printf("Initialisation of %q complete.\n", profile.Name)
 	}
 	return nil
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, `oci-to-wsl – load an OCI container image into a WSL distribution.
-
-Usage:
-  oci-to-wsl --profile <profile.yaml>
-  oci-to-wsl --image <image> --name <distro> [--dir <path>]
-
-Flags:
-`)
-	flag.PrintDefaults()
-	fmt.Fprintf(os.Stderr, `
-Examples:
-  # Use a YAML profile
-  oci-to-wsl --profile ubuntu.yaml
-
-  # Import directly from Docker Hub
-  oci-to-wsl --image ubuntu:22.04 --name my-ubuntu --dir C:\WSL\ubuntu
-
-  # Import from Azure Container Registry (browser login triggered automatically)
-  oci-to-wsl --image myacr.azurecr.io/myimage:latest --name myimage
-
-Profile YAML example:
-  name: my-ubuntu
-  image: ubuntu:22.04
-  install_dir: C:\WSL\my-ubuntu
-  init_cmds:
-    - apt-get update -y
-    - apt-get install -y curl git
-`)
 }

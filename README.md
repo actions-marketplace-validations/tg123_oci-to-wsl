@@ -2,17 +2,10 @@
 
 Load an OCI container-registry image directly into a **Windows Subsystem for Linux** distribution – a single, self-contained binary with no runtime dependencies.
 
-## Features
-
-| Feature | Detail |
-|---|---|
-| Single binary | Pure Go; produces one `.exe` with no extra DLLs or runtimes required |
-| OCI image pull | Uses [go-containerregistry](https://github.com/google/go-containerregistry) (`crane`) to pull and flatten any OCI image into a rootfs tar |
-| WSL import | Calls `wsl.exe --import` automatically |
-| YAML profiles | Describe the image, install path, and post-install commands in a reusable file |
-| ACR support | **Azure Container Registry** (*.azurecr.io / *.azurecr.cn / *.azurecr.us) is detected automatically; the official Azure SDK for Go (`azidentity`) handles a cached `az login` session first, then falls back to an interactive browser sign-in |
-
 ## Quick start
+
+1. Download the latest `oci-to-wsl.exe` from the [GitHub Releases page](https://github.com/tg123/oci-to-wsl/releases/latest) and place it somewhere on your `PATH`.
+2. Run it from PowerShell:
 
 ```powershell
 # From Docker Hub
