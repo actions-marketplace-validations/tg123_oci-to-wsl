@@ -51,10 +51,6 @@ Examples:
 				Usage: "image platform to pull, e.g. linux/amd64 or linux/arm64 (default: host)",
 			},
 			&cli.StringFlag{
-				Name:  "tenant",
-				Usage: "Azure AD tenant ID for ACR auth (required when signed in as a guest in the ACR's tenant)",
-			},
-			&cli.StringFlag{
 				Name:  "save-tar",
 				Usage: "write the exported rootfs tar to this path and skip 'wsl --import' (useful on non-Windows hosts)",
 			},
@@ -74,7 +70,6 @@ func action(_ context.Context, cmd *cli.Command) error {
 	distroName := cmd.String("name")
 	installDir := cmd.String("dir")
 	platform := cmd.String("platform")
-	tenant := cmd.String("tenant")
 	saveTar := cmd.String("save-tar")
 
 	// Build a Profile from the YAML file or the CLI flags.
@@ -99,7 +94,6 @@ func action(_ context.Context, cmd *cli.Command) error {
 			Image:      imageName,
 			InstallDir: installDir,
 			Platform:   platform,
-			Tenant:     tenant,
 		}
 	}
 
@@ -116,9 +110,6 @@ func action(_ context.Context, cmd *cli.Command) error {
 	}
 	if cmd.IsSet("platform") {
 		profile.Platform = platform
-	}
-	if cmd.IsSet("tenant") {
-		profile.Tenant = tenant
 	}
 
 	return loadProfile(profile, saveTar)
@@ -164,7 +155,6 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 
 	if err := registry.PullToTar(profile.Image, tarFile, registry.PullOptions{
 		Platform: profile.Platform,
-		Tenant:   profile.Tenant,
 	}); err != nil {
 		return fmt.Errorf("pulling image: %w", err)
 	}
