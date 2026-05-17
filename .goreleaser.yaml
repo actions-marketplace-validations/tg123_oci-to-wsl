@@ -1,0 +1,37 @@
+version: 2
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: oci-to-wsl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    main: .
+    binary: oci-to-wsl
+    ldflags:
+      - -s -w -X main.mainver={{.Version}}
+archives:
+  - formats: ['zip']
+    allow_different_binary_count: true
+    name_template: >-
+      oci-to-wsl_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    ids:
+      - oci-to-wsl
+checksum:
+  name_template: "checksums.txt"
+snapshot:
+  version_template: "{{ incpatch .Version }}"
+release:
+  draft: true
+  replace_existing_draft: true
+  disable: true
