@@ -40,11 +40,11 @@ func (a *acrAuthenticator) Authorization() (*authn.AuthConfig, error) {
 //
 // The resulting AAD token is exchanged for an ACR refresh token and then a
 // scoped access token via azcontainerregistry.AuthenticationClient.
-func NewACRAuthenticator(registry, tenant string) (authn.Authenticator, error) {
+func NewACRAuthenticator(registry string) (authn.Authenticator, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cred, err := newAzureCredential(tenant)
+	cred, err := newAzureCredential()
 	if err != nil {
 		return nil, fmt.Errorf("building Azure credential: %w", err)
 	}
@@ -62,10 +62,6 @@ func NewACRAuthenticator(registry, tenant string) (authn.Authenticator, error) {
 	exchangeOpts := &azcontainerregistry.AuthenticationClientExchangeAADAccessTokenForACRRefreshTokenOptions{
 		AccessToken: &aadToken.Token,
 	}
-	if tenant != "" {
-		t := tenant
-		exchangeOpts.Tenant = &t
-	}
 	refreshResp, err := authClient.ExchangeAADAccessTokenForACRRefreshToken(
 		ctx,
 		azcontainerregistry.PostContentSchemaGrantTypeAccessToken,
@@ -75,7 +71,7 @@ func NewACRAuthenticator(registry, tenant string) (authn.Authenticator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exchanging AAD token for ACR refresh token: %w", err)
 	}
-	if refreshResp.ACRRefreshToken.RefreshToken == nil {
+	if refreshResp.RefreshToken == nil {
 		return nil, fmt.Errorf("ACR refresh token response was empty")
 	}
 
@@ -84,7 +80,7 @@ func NewACRAuthenticator(registry, tenant string) (authn.Authenticator, error) {
 		ctx,
 		registry,
 		"repository:*:pull",
-		*refreshResp.ACRRefreshToken.RefreshToken,
+		*refreshResp.RefreshToken,
 		&azcontainerregistry.AuthenticationClientExchangeACRRefreshTokenForACRAccessTokenOptions{
 			GrantType: &grant,
 		},
@@ -92,32 +88,24 @@ func NewACRAuthenticator(registry, tenant string) (authn.Authenticator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exchanging ACR refresh token for access token: %w", err)
 	}
-	if accessResp.ACRAccessToken.AccessToken == nil {
+	if accessResp.AccessToken == nil {
 		return nil, fmt.Errorf("ACR access token response was empty")
 	}
 
-	return &acrAuthenticator{accessToken: *accessResp.ACRAccessToken.AccessToken}, nil
+	return &acrAuthenticator{accessToken: *accessResp.AccessToken}, nil
 }
 
 // newAzureCredential builds a credential chain that first tries the Azure CLI
 // (so users who have already run `az login` skip any prompting) and falls back
 // to an interactive browser login.
-func newAzureCredential(tenant string) (azcore.TokenCredential, error) {
+func newAzureCredential() (azcore.TokenCredential, error) {
 	var sources []azcore.TokenCredential
 
-	cliOpts := &azidentity.AzureCLICredentialOptions{}
-	if tenant != "" {
-		cliOpts.TenantID = tenant
-	}
-	if cli, err := azidentity.NewAzureCLICredential(cliOpts); err == nil {
+	if cli, err := azidentity.NewAzureCLICredential(nil); err == nil {
 		sources = append(sources, cli)
 	}
 
-	browserOpts := &azidentity.InteractiveBrowserCredentialOptions{}
-	if tenant != "" {
-		browserOpts.TenantID = tenant
-	}
-	browser, err := azidentity.NewInteractiveBrowserCredential(browserOpts)
+	browser, err := azidentity.NewInteractiveBrowserCredential(nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating interactive browser credential: %w", err)
 	}

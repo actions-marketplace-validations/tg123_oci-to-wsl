@@ -49,13 +49,9 @@ func TestACRAuthenticatorAuthorization(t *testing.T) {
 	}
 }
 
-// TestNewAzureCredential ensures the credential chain builds without error in
-// both the empty-tenant and explicit-tenant cases.
+// TestNewAzureCredential ensures the credential chain builds without error.
 func TestNewAzureCredential(t *testing.T) {
-	if _, err := newAzureCredential(""); err != nil {
-		t.Errorf("newAzureCredential(\"\"): unexpected error: %v", err)
-	}
-	if _, err := newAzureCredential("00000000-0000-0000-0000-000000000000"); err != nil {
-		t.Errorf("newAzureCredential(tenant): unexpected error: %v", err)
+	if _, err := newAzureCredential(); err != nil {
+		t.Errorf("newAzureCredential: unexpected error: %v", err)
 	}
 }
