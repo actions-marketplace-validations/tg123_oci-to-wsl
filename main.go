@@ -108,9 +108,9 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 		return fmt.Errorf("creating tar file %q: %w", tarPath, err)
 	}
 	defer func() {
-		tarFile.Close()
+		_ = tarFile.Close()
 		if cleanup {
-			os.Remove(tarPath)
+			_ = os.Remove(tarPath)
 		}
 	}()
 
@@ -120,7 +120,7 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 	}); err != nil {
 		return fmt.Errorf("pulling image: %w", err)
 	}
-	tarFile.Close()
+	_ = tarFile.Close()
 
 	if saveTar != "" {
 		fi, _ := os.Stat(tarPath)

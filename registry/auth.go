@@ -172,7 +172,7 @@ func requestDeviceCode(tenant string) (*acrDeviceCodeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("device code request failed (%d): %s", resp.StatusCode, body)
@@ -201,7 +201,7 @@ func pollForToken(deviceCode string, intervalSecs, expiresSecs int, tenant strin
 			return "", err
 		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		var tr aadTokenResponse
 		if err := json.Unmarshal(body, &tr); err != nil {
@@ -239,7 +239,7 @@ func exchangeACRToken(registry, tenant, aadAccessToken string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ACR token exchange failed (%d): %s", resp.StatusCode, body)
@@ -262,7 +262,7 @@ func getACRAccessToken(registry, acrRefreshToken string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ACR access token request failed (%d): %s", resp.StatusCode, body)
