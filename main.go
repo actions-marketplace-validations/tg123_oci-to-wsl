@@ -24,12 +24,18 @@ func run() error {
 		imageName   string
 		distroName  string
 		installDir  string
+		platform    string
+		tenant      string
+		saveTar     string
 	)
 
 	flag.StringVar(&profilePath, "profile", "", "Path to a YAML profile file (overrides other flags when set)")
 	flag.StringVar(&imageName, "image", "", "OCI image reference, e.g. ubuntu:22.04 or myacr.azurecr.io/myimage:latest")
 	flag.StringVar(&distroName, "name", "", "WSL distribution name to create")
 	flag.StringVar(&installDir, "dir", "", "Directory to store the WSL virtual disk (default: ./<name>)")
+	flag.StringVar(&platform, "platform", "", "Image platform to pull, e.g. linux/amd64 or linux/arm64 (default: host)")
+	flag.StringVar(&tenant, "tenant", "", "Azure AD tenant id for ACR auth (required when signed-in as a guest in the ACR's tenant)")
+	flag.StringVar(&saveTar, "save-tar", "", "Write the exported rootfs tar to this path and skip 'wsl --import' (useful on non-Windows hosts)")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -42,51 +48,89 @@ func run() error {
 			return fmt.Errorf("loading profile: %w", err)
 		}
 	} else {
-		if imageName == "" || distroName == "" {
+		if imageName == "" {
 			flag.Usage()
-			return fmt.Errorf("provide --profile, or both --image and --name")
+			return fmt.Errorf("provide --profile, or --image (and --name unless --save-tar is set)")
+		}
+		if distroName == "" && saveTar == "" {
+			flag.Usage()
+			return fmt.Errorf("--name is required unless --save-tar is set")
 		}
 		profile = &config.Profile{
 			Name:       distroName,
 			Image:      imageName,
 			InstallDir: installDir,
+			Platform:   platform,
+			Tenant:     tenant,
 		}
 	}
 
-	return loadProfile(profile)
+	// CLI flags override matching profile fields when explicitly set.
+	if platform != "" {
+		profile.Platform = platform
+	}
+	if tenant != "" {
+		profile.Tenant = tenant
+	}
+
+	return loadProfile(profile, saveTar)
 }
 
-func loadProfile(profile *config.Profile) error {
-	if profile.Name == "" {
-		return fmt.Errorf("profile: 'name' is required")
-	}
+func loadProfile(profile *config.Profile, saveTar string) error {
 	if profile.Image == "" {
 		return fmt.Errorf("profile: 'image' is required")
 	}
-	if profile.InstallDir == "" {
-		profile.InstallDir = filepath.Join(".", profile.Name)
+	if saveTar == "" && profile.Name == "" {
+		return fmt.Errorf("profile: 'name' is required")
+	}
+	if saveTar == "" {
+		if profile.InstallDir == "" {
+			profile.InstallDir = filepath.Join(".", profile.Name)
+		}
+		if err := os.MkdirAll(profile.InstallDir, 0700); err != nil {
+			return fmt.Errorf("creating install directory %q: %w", profile.InstallDir, err)
+		}
 	}
 
-	// Create the install directory if it doesn't exist.
-	if err := os.MkdirAll(profile.InstallDir, 0700); err != nil {
-		return fmt.Errorf("creating install directory %q: %w", profile.InstallDir, err)
+	// Decide tar destination + cleanup policy.
+	var tarPath string
+	var cleanup bool
+	if saveTar != "" {
+		tarPath = saveTar
+		cleanup = false
+	} else {
+		tarPath = filepath.Join(os.TempDir(), profile.Name+"-rootfs.tar")
+		cleanup = true
 	}
 
-	// Pull the OCI image and write it to a temporary rootfs tar.
-	tarPath := filepath.Join(os.TempDir(), profile.Name+"-rootfs.tar")
 	tarFile, err := os.Create(tarPath)
 	if err != nil {
-		return fmt.Errorf("creating temporary tar file: %w", err)
+		return fmt.Errorf("creating tar file %q: %w", tarPath, err)
 	}
 	defer func() {
 		tarFile.Close()
-		os.Remove(tarPath)
+		if cleanup {
+			os.Remove(tarPath)
+		}
 	}()
 
-	if err := registry.PullToTar(profile.Image, tarFile, registry.PullOptions{}); err != nil {
+	if err := registry.PullToTar(profile.Image, tarFile, registry.PullOptions{
+		Platform: profile.Platform,
+		Tenant:   profile.Tenant,
+	}); err != nil {
 		return fmt.Errorf("pulling image: %w", err)
 	}
 	tarFile.Close()
+
+	if saveTar != "" {
+		fi, _ := os.Stat(tarPath)
+		fmt.Printf("Wrote rootfs tar to %s", tarPath)
+		if fi != nil {
+			fmt.Printf(" (%d bytes)", fi.Size())
+		}
+		fmt.Println()
+		return nil
+	}
 
 	// Import the rootfs into WSL.
 	if err := wsl.Import(wsl.ImportOptions{
