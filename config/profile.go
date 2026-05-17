@@ -26,6 +26,10 @@ type Profile struct {
 	// Format is "os/arch" (e.g. "linux/amd64", "linux/arm64"). When empty
 	// the host's runtime arch is used (with OS forced to linux).
 	Platform string `yaml:"platform"`
+
+	// Tenant is the Azure AD tenant ID to use for ACR auth. Required when
+	// signed in as a guest user in the ACR's tenant.
+	Tenant string `yaml:"tenant"`
 }
 
 // LoadProfile reads a YAML profile from the given file path.

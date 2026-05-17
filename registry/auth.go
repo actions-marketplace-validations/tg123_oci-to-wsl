@@ -31,7 +31,9 @@ func (a *acrAuthenticator) Authorization() (*authn.AuthConfig, error) {
 }
 
 // NewACRAuthenticator builds an authn.Authenticator for the given ACR endpoint
-// using the official Azure SDK for Go.
+// using the official Azure SDK for Go. If tenantID is non-empty it is passed
+// to the underlying azidentity credentials, which is required when the
+// signed-in user is a guest in the ACR's tenant.
 //
 // Authentication flow (delegated to the Azure SDK):
 //  1. azidentity.AzureCLICredential – reuses an existing `az login` session.
@@ -40,11 +42,11 @@ func (a *acrAuthenticator) Authorization() (*authn.AuthConfig, error) {
 //
 // The resulting AAD token is exchanged for an ACR refresh token and then a
 // scoped access token via azcontainerregistry.AuthenticationClient.
-func NewACRAuthenticator(registry string) (authn.Authenticator, error) {
+func NewACRAuthenticator(registry, tenantID string) (authn.Authenticator, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cred, err := newAzureCredential()
+	cred, err := newAzureCredential(tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("building Azure credential: %w", err)
 	}
@@ -97,15 +99,24 @@ func NewACRAuthenticator(registry string) (authn.Authenticator, error) {
 
 // newAzureCredential builds a credential chain that first tries the Azure CLI
 // (so users who have already run `az login` skip any prompting) and falls back
-// to an interactive browser login.
-func newAzureCredential() (azcore.TokenCredential, error) {
+// to an interactive browser login. When tenantID is non-empty it is forwarded
+// to both credentials so users can target a specific AAD tenant.
+func newAzureCredential(tenantID string) (azcore.TokenCredential, error) {
 	var sources []azcore.TokenCredential
 
-	if cli, err := azidentity.NewAzureCLICredential(nil); err == nil {
+	cliOpts := &azidentity.AzureCLICredentialOptions{}
+	if tenantID != "" {
+		cliOpts.TenantID = tenantID
+	}
+	if cli, err := azidentity.NewAzureCLICredential(cliOpts); err == nil {
 		sources = append(sources, cli)
 	}
 
-	browser, err := azidentity.NewInteractiveBrowserCredential(nil)
+	browserOpts := &azidentity.InteractiveBrowserCredentialOptions{}
+	if tenantID != "" {
+		browserOpts.TenantID = tenantID
+	}
+	browser, err := azidentity.NewInteractiveBrowserCredential(browserOpts)
 	if err != nil {
 		return nil, fmt.Errorf("creating interactive browser credential: %w", err)
 	}

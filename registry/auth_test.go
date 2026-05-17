@@ -51,7 +51,7 @@ func TestACRAuthenticatorAuthorization(t *testing.T) {
 
 // TestNewAzureCredential ensures the credential chain builds without error.
 func TestNewAzureCredential(t *testing.T) {
-	if _, err := newAzureCredential(); err != nil {
+	if _, err := newAzureCredential(""); err != nil {
 		t.Errorf("newAzureCredential: unexpected error: %v", err)
 	}
 }

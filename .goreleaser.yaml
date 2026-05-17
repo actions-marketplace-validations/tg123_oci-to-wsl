@@ -32,6 +32,4 @@ checksum:
 snapshot:
   version_template: "{{ incpatch .Version }}"
 release:
-  draft: true
-  replace_existing_draft: true
   disable: true

@@ -26,6 +26,10 @@ type PullOptions struct {
 	// Format is "os/arch" (e.g. "linux/amd64", "linux/arm64"). When empty
 	// the host's runtime arch is used (with OS forced to linux).
 	Platform string
+
+	// Tenant is the Azure AD tenant ID to use for ACR auth. Empty selects
+	// the credential's default tenant.
+	Tenant string
 }
 
 // PullToTar pulls the OCI image identified by imageRef and writes the flattened
@@ -71,7 +75,7 @@ func buildCraneOptions(ref name.Reference, platform *v1.Platform, opts PullOptio
 	registry := ref.Context().RegistryStr()
 	if isACR(registry) {
 		fmt.Printf("Detected ACR registry %s – authenticating via Azure SDK ...\n", registry)
-		auth, err := NewACRAuthenticator(registry)
+		auth, err := NewACRAuthenticator(registry, opts.Tenant)
 		if err != nil {
 			// Fall through to default keychain; the error will surface during pull.
 			fmt.Printf("Warning: ACR browser auth failed: %v – falling back to keychain\n", err)

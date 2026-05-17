@@ -3,7 +3,9 @@ package wsl
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -20,7 +22,8 @@ type ImportOptions struct {
 }
 
 // Import creates a new WSL distribution by calling "wsl.exe --import".
-// This is Windows-only; on other platforms it returns an error explaining that.
+// This is Windows-only; on non-Windows hosts wsl.exe cannot be located and
+// findWSL returns an error indicating WSL is unavailable on this OS.
 func Import(opts ImportOptions) error {
 	wslPath, err := findWSL()
 	if err != nil {
@@ -66,8 +69,8 @@ func findWSL() (string, error) {
 	}
 	// Fall back to the well-known system location on Windows.
 	const winPath = `C:\Windows\System32\wsl.exe`
-	if path, err := exec.LookPath(winPath); err == nil {
-		return path, nil
+	if fi, err := os.Stat(winPath); err == nil && !fi.IsDir() {
+		return winPath, nil
 	}
-	return "", fmt.Errorf("wsl.exe not found; ensure Windows Subsystem for Linux is installed")
+	return "", fmt.Errorf("wsl.exe not found on %s; ensure you are running on Windows with WSL installed", runtime.GOOS)
 }

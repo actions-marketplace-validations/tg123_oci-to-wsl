@@ -7,8 +7,8 @@
 name: my-ubuntu
 
 # OCI image reference.  Any registry that requires authentication will be
-# handled automatically – Azure Container Registry images trigger a browser
-# login via Azure AD device-code flow.
+# handled automatically – Azure Container Registry images open the default
+# browser for an Azure AD interactive sign-in (no device-code copy/paste).
 image: ubuntu:22.04
 
 # Where to store the WSL virtual disk.  Defaults to .\<name> when omitted.

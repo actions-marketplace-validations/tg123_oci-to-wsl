@@ -36,7 +36,7 @@ See [`example-profile.yaml`](example-profile.yaml) for a complete example.
 
 ```powershell
 # Requires Go 1.21+
-GOOS=windows GOARCH=amd64 go build -o oci-to-wsl.exe .
+$env:GOOS = 'windows'; $env:GOARCH = 'amd64'; go build -o oci-to-wsl.exe .
 ```
 
 ## How ACR authentication works
