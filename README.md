@@ -114,6 +114,17 @@ files:                           # optional – injected into the rootfs tar so 
 deletes:                         # optional – absolute POSIX paths dropped from the rootfs tar before import
   - /var/cache/apt               # directories are removed recursively; applied before `files`
   - /etc/motd
+users:                           # optional – Linux users created by editing /etc/passwd, /etc/shadow, /etc/group
+  - name: "%USERNAME%"           # required; %VAR% / $VAR / ${VAR} expanded from host env (e.g. mirror Windows login into WSL)
+    uid: 1000                    # optional; auto-allocated from 1000+ when omitted
+    gid: 1000                    # optional; defaults to uid (matching primary group created on demand)
+    home: /home/alice            # optional; defaults to /home/<name>
+    shell: /bin/bash             # optional; defaults to /bin/sh
+    gecos: "Alice Example"       # optional comment / full name
+    groups: [sudo, wheel]        # optional; supplementary groups (missing groups silently skipped)
+    password_hash: "$6$..."      # optional; written verbatim into /etc/shadow (e.g. `openssl passwd -6`)
+    password_plain: "s3cret!"    # optional; hashed with SHA-512 crypt before write (mutually exclusive with password_hash)
+    no_create_home: false        # optional; when true, suppresses the home directory tar entry
 wsl_conf:                        # optional – syntactic sugar for writing /etc/wsl.conf
   mode: merge                    # "merge" (default) merges with any existing /etc/wsl.conf; "replace" overwrites
   content: |                     # raw INI string – %VAR%, $VAR and ${VAR} are expanded against the host environment

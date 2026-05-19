@@ -224,17 +224,46 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 		}
 	}
 	skipTarMods := isTarModsDisabled()
-	if skipTarMods && (len(deletes) > 0 || len(profile.Files) > 0) {
+	if skipTarMods && (len(deletes) > 0 || len(profile.Files) > 0 || len(profile.Users) > 0) {
 		// Print directly to stderr so this notice is not suppressed
 		// by --loglevel error; it reflects a user-requested
 		// behavioural change that should always be visible.
-		fmt.Fprintf(os.Stderr, "OCI_TO_WSL_NO_TAR_MODS is set; skipping profile 'deletes' (%d) and 'files' (%d) tar modifications\n",
-			len(deletes), len(profile.Files))
+		fmt.Fprintf(os.Stderr, "OCI_TO_WSL_NO_TAR_MODS is set; skipping profile 'deletes' (%d), 'users' (%d) and 'files' (%d) tar modifications\n",
+			len(deletes), len(profile.Users), len(profile.Files))
 	}
 	if !skipTarMods && len(deletes) > 0 {
 		slog.Debug("applying profile deletes", "count", len(deletes))
 		if err := wsl.ApplyDeletes(tarPath, deletes); err != nil {
 			return fmt.Errorf("applying deletes to rootfs tar: %w", err)
+		}
+	}
+
+	// Create any profile-defined Linux users by editing /etc/passwd,
+	// /etc/shadow, and /etc/group inside the rootfs tar. Runs after
+	// deletes (so a profile can drop upstream account files and start
+	// from a clean slate) and before copies (so a copy targeting the
+	// new home directory overlays onto the dir created here).
+	if !skipTarMods && len(profile.Users) > 0 {
+		usrs := make([]wsl.UserEntry, 0, len(profile.Users))
+		for _, u := range profile.Users {
+			if strings.TrimSpace(u.Name) == "" {
+				return fmt.Errorf("profile users: 'name' is required")
+			}
+			usrs = append(usrs, wsl.UserEntry{
+				Name:          u.Name,
+				UID:           u.UID,
+				GID:           u.GID,
+				Home:          u.Home,
+				Shell:         u.Shell,
+				Gecos:         u.Gecos,
+				Groups:        u.Groups,
+				PasswordHash:  u.PasswordHash,
+				PasswordPlain: u.PasswordPlain,
+				NoCreateHome:  u.NoCreateHome,
+			})
+		}
+		if err := wsl.ApplyUsers(tarPath, usrs); err != nil {
+			return fmt.Errorf("creating users in rootfs tar: %w", err)
 		}
 	}
 
@@ -254,22 +283,6 @@ func loadProfile(profile *config.Profile, saveTar string) error {
 		}
 		if err := wsl.InjectCopies(tarPath, injects); err != nil {
 			return fmt.Errorf("staging files into rootfs tar: %w", err)
-		}
-	}
-
-	// Apply the wsl_conf profile sugar last so that it can override any
-	// /etc/wsl.conf staged via copies (or shipped in the upstream image).
-	if profile.WslConf != nil && strings.TrimSpace(profile.WslConf.Content) != "" {
-		if err := wsl.ApplyWslConf(tarPath, profile.WslConf.Content, wsl.WslConfMode(profile.WslConf.Mode)); err != nil {
-			return fmt.Errorf("applying wsl_conf to rootfs tar: %w", err)
-		}
-	}
-
-	// Apply the wsl_conf profile sugar last so that it can override any
-	// /etc/wsl.conf staged via copies (or shipped in the upstream image).
-	if profile.WslConf != nil && strings.TrimSpace(profile.WslConf.Content) != "" {
-		if err := wsl.ApplyWslConf(tarPath, profile.WslConf.Content, wsl.WslConfMode(profile.WslConf.Mode)); err != nil {
-			return fmt.Errorf("applying wsl_conf to rootfs tar: %w", err)
 		}
 	}
 

@@ -181,9 +181,56 @@ func TestExpandHostPath_TildeAndUnknownVars(t *testing.T) {
 		t.Errorf("~/sub/file.txt: got %q, want %q", got, want)
 	}
 
-	// Unknown $VAR and ${VAR} are preserved.
-	if got := config.ExpandHostPath("/a/$OCI_TO_WSL_DEFINITELY_UNSET/b"); got != "/a/${OCI_TO_WSL_DEFINITELY_UNSET}/b" {
+	// Unknown $VAR and ${VAR} are preserved in their original form.
+	if got := config.ExpandHostPath("/a/$OCI_TO_WSL_DEFINITELY_UNSET/b"); got != "/a/$OCI_TO_WSL_DEFINITELY_UNSET/b" {
 		t.Errorf("unknown $VAR not preserved: got %q", got)
+	}
+	if got := config.ExpandHostPath("/a/${OCI_TO_WSL_DEFINITELY_UNSET}/b"); got != "/a/${OCI_TO_WSL_DEFINITELY_UNSET}/b" {
+		t.Errorf("unknown ${VAR} not preserved: got %q", got)
+	}
+}
+
+func TestLoadProfile_ExpandsUserEnvVars(t *testing.T) {
+	t.Setenv("OCI_TO_WSL_TEST_USER", "alice")
+	t.Setenv("OCI_TO_WSL_TEST_SHELL", "/bin/zsh")
+	yaml := `
+name: test
+image: ubuntu:22.04
+users:
+  - name: "%OCI_TO_WSL_TEST_USER%"
+    home: "/home/$OCI_TO_WSL_TEST_USER"
+    shell: "${OCI_TO_WSL_TEST_SHELL}"
+    gecos: "Hello %OCI_TO_WSL_TEST_USER%"
+    groups: ["%OCI_TO_WSL_TEST_USER%-admins"]
+    password_plain: "pw-%OCI_TO_WSL_TEST_USER%"
+    password_hash: "$6$abc$def"
+`
+	p := writeAndLoad(t, yaml)
+	if len(p.Users) != 1 {
+		t.Fatalf("expected 1 user, got %d", len(p.Users))
+	}
+	u := p.Users[0]
+	if u.Name != "alice" {
+		t.Errorf("Name: got %q, want alice", u.Name)
+	}
+	if u.Home != "/home/alice" {
+		t.Errorf("Home: got %q, want /home/alice", u.Home)
+	}
+	if u.Shell != "/bin/zsh" {
+		t.Errorf("Shell: got %q, want /bin/zsh", u.Shell)
+	}
+	if u.Gecos != "Hello alice" {
+		t.Errorf("Gecos: got %q", u.Gecos)
+	}
+	if len(u.Groups) != 1 || u.Groups[0] != "alice-admins" {
+		t.Errorf("Groups: got %v", u.Groups)
+	}
+	if u.PasswordPlain != "pw-alice" {
+		t.Errorf("PasswordPlain: got %q", u.PasswordPlain)
+	}
+	// PasswordHash must be left untouched even though it contains '$' sigils.
+	if u.PasswordHash != "$6$abc$def" {
+		t.Errorf("PasswordHash should not be expanded: got %q", u.PasswordHash)
 	}
 }
 
@@ -362,8 +409,8 @@ func TestLoadProfile_WslConfPreservesUnknownVars(t *testing.T) {
 	}
 	yaml := "name: n\nimage: i\nwsl_conf:\n  content: |\n    [user]\n    default=$OCI_TO_WSL_TEST_MISSING\n"
 	p := writeAndLoad(t, yaml)
-	if p.WslConf == nil || !strings.Contains(p.WslConf.Content, "${OCI_TO_WSL_TEST_MISSING}") {
-		t.Fatalf("missing var should be preserved as ${...}, got %q", p.WslConf.Content)
+	if p.WslConf == nil || !strings.Contains(p.WslConf.Content, "$OCI_TO_WSL_TEST_MISSING") {
+		t.Fatalf("missing var should be preserved verbatim, got %q", p.WslConf.Content)
 	}
 }
 

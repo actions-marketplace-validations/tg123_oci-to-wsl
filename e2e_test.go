@@ -177,6 +177,59 @@ init_cmds:
 			},
 		},
 		{
+			name:   "profile_users",
+			distro: "e2e-users",
+			setup: func(t *testing.T, workDir string) []string {
+				profile := `name: e2e-users
+image: alpine:latest
+users:
+  - name: alice
+    uid: 1500
+    gid: 1500
+    shell: /bin/sh
+    gecos: "Alice E2E"
+    groups: [wheel, doesnotexist]
+    password_hash: "!"
+  - name: bob
+    shell: /bin/sh
+`
+				profilePath := filepath.Join(workDir, "profile.yaml")
+				mustWrite(t, profilePath, profile)
+
+				installDir := filepath.Join(workDir, "wsl-e2e-users")
+				return []string{
+					"--profile", profilePath,
+					"--dir", installDir,
+				}
+			},
+			verifies: []verify{
+				{name: "alice_passwd", script: "getent passwd alice", wantSub: "alice:x:1500:1500:Alice E2E:/home/alice:/bin/sh"},
+				{name: "alice_home_exists", script: "test -d /home/alice && stat -c '%u:%g:%a' /home/alice", want: "1500:1500:700"},
+				{name: "alice_shadow", script: "grep '^alice:' /etc/shadow", wantSub: "alice:!:"},
+				{name: "alice_in_wheel", script: "getent group wheel", wantSub: "alice"},
+				{name: "doesnotexist_not_created", script: "if getent group doesnotexist >/dev/null 2>&1; then echo CREATED; else echo MISSING; fi", want: "MISSING"},
+				{name: "bob_passwd", script: "getent passwd bob", wantSub: "bob:x:"},
+				{name: "bob_home_owned", script: "stat -c '%U' /home/bob", want: "bob"},
+				{name: "alice_can_su", script: "su -s /bin/sh alice -c 'id -un'", want: "alice"},
+				// Ownership-end-to-end: the new user must actually be
+				// able to write to their own home directory on first
+				// boot. This catches regressions where the home dir
+				// header lands in the tar with wrong uid/gid (e.g.,
+				// when the upstream rootfs already ships an explicit
+				// /home/<name> entry owned by root and ApplyUsers
+				// skips emitting a corrective trailing header).
+				{name: "alice_can_write_home", script: "su -s /bin/sh alice -c 'touch /home/alice/.ownership-probe && stat -c %U /home/alice/.ownership-probe'", want: "alice"},
+				{name: "bob_can_write_home", script: "su -s /bin/sh bob -c 'touch /home/bob/.ownership-probe && stat -c %U /home/bob/.ownership-probe'", want: "bob"},
+				// Isolation: alice (uid 1500, mode-0700 home) must not
+				// be able to write into bob's mode-0700 home or into
+				// root-owned /root. This guards against ApplyUsers
+				// regressing home ownership/permissions back to
+				// world-writable or to the wrong uid.
+				{name: "alice_cannot_write_bob_home", script: "su -s /bin/sh alice -c 'if touch /home/bob/.intrusion-probe 2>/dev/null; then echo WROTE; else echo DENIED; fi'", want: "DENIED"},
+				{name: "alice_cannot_write_root_home", script: "su -s /bin/sh alice -c 'if touch /root/.intrusion-probe 2>/dev/null; then echo WROTE; else echo DENIED; fi'", want: "DENIED"},
+			},
+		},
+		{
 			// Default replace=true: the staged directory at /etc/apk fully
 			// replaces the upstream subtree, so alpine's stock
 			// /etc/apk/repositories must NOT be present.
