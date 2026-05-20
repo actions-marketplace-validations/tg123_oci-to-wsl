@@ -33,6 +33,21 @@ $env:OCI_TO_WSL_NO_LOCAL = '1'
 oci-to-wsl.exe --image ubuntu:22.04 --name my-ubuntu
 ```
 
+## Azure Container Registry authentication
+
+For `*.azurecr.io`, `*.azurecr.cn`, and `*.azurecr.us` hosts `oci-to-wsl`
+automatically acquires an AAD token (reusing your `az login` session, then
+falling back to interactive browser sign-in). Set `OCI_TO_WSL_NO_ACR_AAD=1`
+(also accepts `true`/`True`/`TRUE`/`t`) to disable AAD entirely and use the
+normal docker keychain instead, so a username/password (or token) from
+`docker login` is honored just like for any other registry:
+
+```powershell
+$env:OCI_TO_WSL_NO_ACR_AAD = '1'
+docker login myacr.azurecr.io      # or set $env:DOCKER_CONFIG
+oci-to-wsl.exe --image myacr.azurecr.io/myimage:latest --name myimage
+```
+
 ## Cross-platform tars (save-tar mode)
 
 When importing into WSL the image platform is always the host's: importing an
@@ -156,11 +171,13 @@ $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; go build -o oci-to-wsl.exe .
 
 ## How ACR authentication works
 
-ACR auth is delegated to the official [Azure SDK for Go](https://github.com/Azure/azure-sdk-for-go):
+ACR auth is delegated to the official [Azure SDK for Go](https://github.com/Azure/azure-sdk-for-go) and applies to `*.azurecr.io`, `*.azurecr.cn`, and `*.azurecr.us` hosts:
 
-1. **`azidentity.AzureCLICredential`** – if you have already run `az login`, the cached token is reused with no prompting.
+1. **`azidentity.AzureCLICredential`** – if you have already run `az login`, the cached token is reused with no prompting. CLI failures such as "not logged in" are treated as a soft failure and fall through to the browser flow.
 2. **`azidentity.InteractiveBrowserCredential`** – otherwise, the default browser is opened for sign-in (no device-code copy/paste required).
 3. The resulting AAD token is exchanged for a scoped ACR access token via `azcontainerregistry.AuthenticationClient`.
+
+Set `OCI_TO_WSL_NO_ACR_AAD=1` to bypass this entirely and use the docker keychain (`~/.docker/config.json` / `docker login`) instead — see the [Azure Container Registry authentication](#azure-container-registry-authentication) section above.
 
 No credentials are stored on disk by this tool.
 
