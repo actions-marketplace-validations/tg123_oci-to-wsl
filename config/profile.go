@@ -3,10 +3,16 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,13 +28,27 @@ import (
 // and ContentBase64 only produce a single regular file at Dst — they
 // cannot describe a directory tree.
 type FileEntry struct {
-	// Src is the path on the host. May be a file, directory, or symlink.
+	// Src is the path on the host or a network URL. May be a file,
+	// directory, or symlink on the host, or an http:// / https:// URL
+	// whose body is downloaded into a single regular file at Dst.
 	// Windows-native paths (e.g. C:\Users\me\file), %VAR% / $VAR / ${VAR}
 	// environment variable references, and a leading ~ are expanded by
 	// LoadProfile. Relative paths are resolved against the directory of
 	// the profile file when the entry was loaded via LoadProfile;
-	// otherwise against the current working directory.
+	// otherwise against the current working directory. A network URL is
+	// left as-is (only %VAR% / $VAR / ${VAR} are expanded): it is not
+	// resolved against the profile directory and a leading ~ is not
+	// expanded.
 	Src string `yaml:"src,omitempty"`
+
+	// Sha1 is an optional hex SHA-1 digest (40 hex characters) that the
+	// bytes staged from Src must match. It applies to any Src, whether a
+	// local filesystem path or a network URL (http:// or https://). When
+	// set, staging fails if the file's content does not hash to this
+	// value. Comparison is case-insensitive, so the digest may be given in
+	// upper or lower case. Only valid together with Src (not with inline
+	// Content or ContentBase64).
+	Sha1 string `yaml:"sha1,omitempty"`
 
 	// Content is an inline UTF-8 file body. When set, no host file is
 	// read: the bytes are written verbatim to Dst as a single regular
@@ -92,6 +112,19 @@ func (e FileEntry) ReplaceEnabled() bool {
 	return *e.Replace
 }
 
+// IsRemoteSrc reports whether src refers to a network URL (http:// or
+// https://) rather than a host filesystem path. The check is
+// case-insensitive on the scheme. Such sources are downloaded at staging
+// time instead of being read from the local filesystem, and are therefore
+// not resolved against the profile directory nor have a leading ~ expanded.
+func IsRemoteSrc(src string) bool {
+	s := strings.ToLower(strings.TrimSpace(src))
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// sha1HexRE matches a 40-character lowercase-or-uppercase hex SHA-1 digest.
+var sha1HexRE = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+
 // Validate checks that this FileEntry is well-formed: Dst must be set, and
 // exactly one source of file data (Src, Content, or ContentBase64) must be
 // provided. When ContentBase64 is set, it must also decode as standard
@@ -123,6 +156,14 @@ func (e *FileEntry) Validate() error {
 			return fmt.Errorf("%q: decoding content_base64: %w", e.Dst, err)
 		}
 		e.decodedBase64 = decoded
+	}
+	if e.Sha1 != "" {
+		if e.Src == "" {
+			return fmt.Errorf("%q: 'sha1' is only valid together with a 'src'", e.Dst)
+		}
+		if !sha1HexRE.MatchString(strings.TrimSpace(e.Sha1)) {
+			return fmt.Errorf("%q: 'sha1' must be a 40-character hex digest", e.Dst)
+		}
 	}
 	return nil
 }
@@ -398,11 +439,23 @@ func (p *Profile) Validate() error {
 	return nil
 }
 
-// LoadProfile reads a YAML profile from the given file path.
+// LoadProfile reads a YAML profile from the given location. As with
+// `kubectl apply -f`, the location may be:
+//
+//   - a path on the host filesystem (the default);
+//   - "-" to read the profile from standard input;
+//   - an http:// or https:// URL to fetch the profile over the network.
+//
+// Relative `files` sources are resolved against the directory of the
+// profile file. For stdin and URLs there is no such directory, so they are
+// resolved against the current working directory instead. When the profile
+// is loaded from a URL and OCI_TO_WSL_PROFILE_FOLLOW_URL is enabled, relative
+// `files` sources are instead resolved against — and downloaded from — the
+// profile's own URL.
 func LoadProfile(path string) (*Profile, error) {
-	data, err := os.ReadFile(path)
+	data, baseDir, baseURL, err := readProfile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading profile %q: %w", path, err)
+		return nil, err
 	}
 	var p Profile
 	if err := yaml.Unmarshal(data, &p); err != nil {
@@ -422,11 +475,36 @@ func LoadProfile(path string) (*Profile, error) {
 	// references and a leading ~ for the user's home folder, then resolve
 	// remaining relative paths against the profile file's directory so
 	// profiles remain portable regardless of the caller's CWD.
-	baseDir := filepath.Dir(path)
 	for i := range p.Files {
 		p.Files[i].Dst = ExpandEnvVars(p.Files[i].Dst)
 		src := p.Files[i].Src
 		if src == "" {
+			continue
+		}
+		// When the profile itself came from an http(s):// URL and the
+		// operator opted into following the network (baseURL != ""),
+		// treat `src` as a sibling resource of the profile URL and
+		// download it over the network into an inline body, instead of
+		// reading from the local filesystem. This path enforces the
+		// same-origin/base-dir confinement in resolveProfileFileURL, so it
+		// must take precedence over the generic remote-URL handling below
+		// (an absolute URL src here is rejected, not silently fetched).
+		if baseURL != "" {
+			b64, ferr := fetchProfileFile(baseURL, src)
+			if ferr != nil {
+				return nil, ferr
+			}
+			p.Files[i].Src = ""
+			p.Files[i].ContentBase64 = &b64
+			continue
+		}
+		// Network URLs are downloaded at staging time, not read from the
+		// host filesystem: only expand %VAR% / $VAR / ${VAR} and leave the
+		// URL otherwise intact (no profile-dir resolution, no ~ expansion).
+		// Surrounding whitespace is trimmed so detection (IsRemoteSrc trims
+		// before checking) and staging (fetchRemoteSrc) stay consistent.
+		if IsRemoteSrc(src) {
+			p.Files[i].Src = strings.TrimSpace(ExpandEnvVars(src))
 			continue
 		}
 		src = ExpandHostPath(src)
@@ -481,7 +559,212 @@ func LoadProfile(path string) (*Profile, error) {
 	return &p, nil
 }
 
-// winEnvVarRE matches Windows-style %NAME% environment variable references.
+// readProfile resolves a profile location to its raw bytes, the base
+// directory used to resolve relative `files` sources, and (when applicable)
+// the base URL used to resolve them over the network. It supports a local
+// file path, "-" for standard input, and http(s):// URLs, mirroring the
+// input handling of `kubectl apply -f`. For stdin and URLs there is no
+// enclosing directory, so the current working directory is used as the
+// base (falling back to "." if it cannot be determined). When the profile is
+// fetched from a URL and OCI_TO_WSL_PROFILE_FOLLOW_URL is enabled, baseURL is
+// returned non-empty so relative `files` sources are downloaded from the same
+// URL instead of the local filesystem.
+func readProfile(path string) (data []byte, baseDir, baseURL string, err error) {
+	switch {
+	case path == "-":
+		data, err = readLimited(os.Stdin)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("reading profile from stdin: %w", err)
+		}
+		return data, workingDir(), "", nil
+	case isHTTPURL(path):
+		data, err = fetchProfileURL(path, "", "")
+		if err != nil {
+			return nil, "", "", err
+		}
+		// Only follow relative file sources over the network when the
+		// operator has explicitly opted in; otherwise keep the safe
+		// default of resolving them on the local filesystem.
+		if isFollowProfileURLEnabled() {
+			return data, "", path, nil
+		}
+		return data, workingDir(), "", nil
+	default:
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("reading profile %q: %w", path, err)
+		}
+		return data, filepath.Dir(path), "", nil
+	}
+}
+
+// envFollowProfileURL, when set to a value parseable as true by
+// strconv.ParseBool (e.g. "1", "t", "true", "True", "TRUE"), makes relative
+// `files[].src` entries in a profile that was itself loaded from an
+// http(s):// URL resolve against that profile's URL and be downloaded over
+// the network, instead of being read from the local filesystem. It is
+// opt-in (default off) because fetching files named by a remote document
+// broadens the trust placed in that document.
+const envFollowProfileURL = "OCI_TO_WSL_PROFILE_FOLLOW_URL"
+const envMaxProfileSize = "OCI_TO_WSL_MAX_PROFILE_SIZE"
+
+// isFollowProfileURLEnabled reports whether relative profile file sources
+// should be downloaded over the network for URL-loaded profiles. Controlled
+// by the OCI_TO_WSL_PROFILE_FOLLOW_URL environment variable (default false);
+// the value is parsed with strconv.ParseBool.
+func isFollowProfileURLEnabled() bool {
+	v, err := strconv.ParseBool(os.Getenv(envFollowProfileURL))
+	if err != nil {
+		return false
+	}
+	return v
+}
+
+// isHTTPURL reports whether s looks like an http:// or https:// URL. The
+// scheme comparison is case-insensitive, since URL schemes are not
+// case-sensitive (e.g. "HTTPS://" is valid).
+func isHTTPURL(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+// defaultMaxProfileSize caps how many bytes are read from stdin or an http(s)
+// response when loading a profile by default. Profiles are expected to be
+// small, so this guards against excessive memory usage or OOM from unbounded
+// input.
+const defaultMaxProfileSize int64 = 1 << 20 // 1 MiB
+
+// maxProfileSize reports the profile read limit in bytes. It defaults to
+// 1 MiB, and can be overridden by OCI_TO_WSL_MAX_PROFILE_SIZE with a positive
+// integer byte count.
+func maxProfileSize() int64 {
+	v := strings.TrimSpace(os.Getenv(envMaxProfileSize))
+	if v == "" {
+		return defaultMaxProfileSize
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return defaultMaxProfileSize
+	}
+	return n
+}
+
+// readLimited reads up to maxProfileSize bytes from r and errors if the
+// input exceeds that limit.
+func readLimited(r io.Reader) ([]byte, error) {
+	limit := maxProfileSize()
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("profile exceeds maximum size of %d bytes", limit)
+	}
+	return data, nil
+}
+
+// workingDir returns the current working directory, falling back to "." if
+// it cannot be determined.
+func workingDir() string {
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+// fetchProfileURL downloads a profile (or a profile-referenced file) over
+// http(s) and returns its body. When sameHost is non-empty, redirects are
+// restricted to that scheme+host pair, preventing a remote document from
+// bouncing the request to an arbitrary (possibly internal) server.
+func fetchProfileURL(rawURL, sameScheme, sameHost string) ([]byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	if sameHost != "" {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if !strings.EqualFold(req.URL.Scheme, sameScheme) {
+				return fmt.Errorf("refusing cross-scheme redirect to %q", req.URL.Scheme)
+			}
+			if !strings.EqualFold(req.URL.Host, sameHost) {
+				return fmt.Errorf("refusing cross-host redirect to %q", req.URL.Host)
+			}
+			return nil
+		}
+	}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetching profile %q: %w", rawURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetching profile %q: unexpected status %s", rawURL, resp.Status)
+	}
+	data, err := readLimited(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading profile %q: %w", rawURL, err)
+	}
+	return data, nil
+}
+
+// fetchProfileFile downloads a profile-referenced file named by a relative
+// `src` against the profile's baseURL and returns it base64-encoded for use
+// as an inline FileEntry body.
+func fetchProfileFile(baseURL, ref string) (string, error) {
+	target, scheme, host, err := resolveProfileFileURL(baseURL, ref)
+	if err != nil {
+		return "", err
+	}
+	data, err := fetchProfileURL(target, scheme, host)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// resolveProfileFileURL resolves a relative profile file reference against the
+// profile's own URL, enforcing that the result stays same-origin (identical
+// scheme and host) and within the directory containing the profile. These
+// constraints keep "follow the network" from being abused as a request
+// forgery primitive (e.g. a remote profile referencing http://169.254.169.254/
+// or ../../ paths on the same host) once the operator has opted in.
+func resolveProfileFileURL(baseURL, ref string) (target, scheme, host string, err error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("parsing profile URL %q: %w", baseURL, err)
+	}
+	r, err := url.Parse(ref)
+	if err != nil {
+		return "", "", "", fmt.Errorf("parsing profile file %q: %w", ref, err)
+	}
+	// A reference must be a relative path: carrying its own scheme or host
+	// would let a remote profile pull files from an arbitrary server.
+	if r.Scheme != "" || r.Host != "" {
+		return "", "", "", fmt.Errorf("profile file %q must be a relative path, not an absolute URL", ref)
+	}
+	resolved := base.ResolveReference(r)
+	if !strings.EqualFold(resolved.Scheme, base.Scheme) || !strings.EqualFold(resolved.Host, base.Host) {
+		return "", "", "", fmt.Errorf("profile file %q resolves outside the profile's host", ref)
+	}
+	// ResolveReference removes dot segments, but still confine the result to
+	// the profile's own directory so "../" cannot reach unrelated paths.
+	if !urlPathWithin(path.Dir(base.Path), resolved.Path) {
+		return "", "", "", fmt.Errorf("profile file %q escapes the profile's base directory", ref)
+	}
+	return resolved.String(), base.Scheme, base.Host, nil
+}
+
+// urlPathWithin reports whether the cleaned URL path p is baseDir or lives
+// underneath it.
+func urlPathWithin(baseDir, p string) bool {
+	baseDir = path.Clean("/" + strings.Trim(baseDir, "/"))
+	cp := path.Clean("/" + p)
+	if baseDir == "/" {
+		return true
+	}
+	return cp == baseDir || strings.HasPrefix(cp, baseDir+"/")
+}
+
 // NAME must be at least one non-% character to avoid matching a literal "%%".
 var winEnvVarRE = regexp.MustCompile(`%([^%]+)%`)
 

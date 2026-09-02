@@ -1,6 +1,9 @@
 package config_test
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -455,6 +458,32 @@ func TestProfile_Validate(t *testing.T) {
 			}},
 			wantErr: "decoding content_base64",
 		},
+		{
+			name: "sha1 with remote src ok",
+			profile: config.Profile{Image: "alpine", Files: []config.FileEntry{
+				{Src: "https://example.com/x", Sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709", Dst: "/x"},
+			}},
+		},
+		{
+			name: "sha1 with local src",
+			profile: config.Profile{Image: "alpine", Files: []config.FileEntry{
+				{Src: "/host/x", Sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709", Dst: "/x"},
+			}},
+		},
+		{
+			name: "sha1 without src",
+			profile: config.Profile{Image: "alpine", Files: []config.FileEntry{
+				{Content: s("hi"), Sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709", Dst: "/x"},
+			}},
+			wantErr: "only valid together with a 'src'",
+		},
+		{
+			name: "sha1 malformed",
+			profile: config.Profile{Image: "alpine", Files: []config.FileEntry{
+				{Src: "https://example.com/x", Sha1: "deadbeef", Dst: "/x"},
+			}},
+			wantErr: "40-character hex digest",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -472,6 +501,307 @@ func TestProfile_Validate(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadProfile_RemoteSrcNotResolvedAsPath(t *testing.T) {
+	t.Setenv("OCI_TO_WSL_TEST_HOST", "downloads.example.com")
+	yaml := `
+name: remote-distro
+image: alpine:latest
+files:
+  - src: https://%OCI_TO_WSL_TEST_HOST%/tools/installer.sh
+    dst: /usr/local/bin/installer.sh
+    sha1: da39a3ee5e6b4b0d3255bfef95601890afd80709
+  - src: HTTP://example.com/x
+    dst: /tmp/x
+  - src: "  https://example.com/y  "
+    dst: /tmp/y
+`
+	p := writeAndLoad(t, yaml)
+	if len(p.Files) != 3 {
+		t.Fatalf("Files length: got %d, want 3", len(p.Files))
+	}
+	// %VAR% is expanded, but the URL is otherwise left intact (not joined
+	// against the profile directory).
+	want0 := "https://downloads.example.com/tools/installer.sh"
+	if p.Files[0].Src != want0 {
+		t.Errorf("Files[0].Src: got %q, want %q", p.Files[0].Src, want0)
+	}
+	if p.Files[0].Sha1 != "da39a3ee5e6b4b0d3255bfef95601890afd80709" {
+		t.Errorf("Files[0].Sha1: got %q", p.Files[0].Sha1)
+	}
+	// Scheme detection is case-insensitive.
+	if p.Files[1].Src != "HTTP://example.com/x" {
+		t.Errorf("Files[1].Src: got %q, want unchanged URL", p.Files[1].Src)
+	}
+	// Surrounding whitespace is trimmed so detection and staging stay
+	// consistent (a URL with spaces would otherwise fail at fetch time).
+	if p.Files[2].Src != "https://example.com/y" {
+		t.Errorf("Files[2].Src: got %q, want trimmed URL", p.Files[2].Src)
+	}
+}
+
+func TestIsRemoteSrc(t *testing.T) {
+	cases := map[string]bool{
+		"http://example.com/x":  true,
+		"https://example.com/x": true,
+		"HTTPS://EXAMPLE/x":     true,
+		"  http://x ":           true,
+		"/host/path":            false,
+		`C:\Users\me\file`:      false,
+		"ftp://example.com/x":   false,
+		"":                      false,
+	}
+	for in, want := range cases {
+		if got := config.IsRemoteSrc(in); got != want {
+			t.Errorf("IsRemoteSrc(%q): got %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestLoadProfile_FromStdin verifies LoadProfile reads a profile from stdin
+// when the path is "-".
+func TestLoadProfile_FromStdin(t *testing.T) {
+	yaml := "name: stdin-distro\nimage: alpine:latest\n"
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(yaml); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+
+	orig := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = orig; _ = r.Close() }()
+
+	p, err := config.LoadProfile("-")
+	if err != nil {
+		t.Fatalf("LoadProfile(-): unexpected error: %v", err)
+	}
+	if p.Name != "stdin-distro" {
+		t.Errorf("Name: got %q, want %q", p.Name, "stdin-distro")
+	}
+	if p.Image != "alpine:latest" {
+		t.Errorf("Image: got %q, want %q", p.Image, "alpine:latest")
+	}
+}
+
+func TestLoadProfile_FromStdinResolvesRelativeSrc(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "bootstrap.sh")
+	if err := os.WriteFile(srcPath, []byte("#!/bin/sh\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Relative `src` should resolve against the current working directory
+	// for stdin (there is no profile file directory).
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	yaml := "name: stdin-distro\nimage: alpine:latest\nfiles:\n  - src: ./bootstrap.sh\n    dst: /opt/bootstrap.sh\n"
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(yaml); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+
+	orig := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = orig; _ = r.Close() }()
+
+	p, err := config.LoadProfile("-")
+	if err != nil {
+		t.Fatalf("LoadProfile(-): unexpected error: %v", err)
+	}
+	if len(p.Files) != 1 {
+		t.Fatalf("Files length: got %d, want 1", len(p.Files))
+	}
+	if !filepath.IsAbs(p.Files[0].Src) {
+		t.Errorf("Files[0].Src not absolute: %q", p.Files[0].Src)
+	}
+	if filepath.Base(p.Files[0].Src) != "bootstrap.sh" {
+		t.Errorf("Files[0].Src base: got %q, want bootstrap.sh", p.Files[0].Src)
+	}
+}
+
+func TestLoadProfile_FromURL(t *testing.T) {
+	yaml := "name: url-distro\nimage: alpine:latest\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, yaml)
+	}))
+	defer srv.Close()
+
+	p, err := config.LoadProfile(srv.URL)
+	if err != nil {
+		t.Fatalf("LoadProfile(url): unexpected error: %v", err)
+	}
+	if p.Name != "url-distro" {
+		t.Errorf("Name: got %q, want %q", p.Name, "url-distro")
+	}
+	if p.Image != "alpine:latest" {
+		t.Errorf("Image: got %q, want %q", p.Image, "alpine:latest")
+	}
+}
+
+func TestLoadProfile_FromURLNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := config.LoadProfile(srv.URL)
+	if err == nil {
+		t.Fatal("expected error for non-200 response, got nil")
+	}
+}
+
+func TestLoadProfile_FromURLFollowsRelativeSrc(t *testing.T) {
+	const body = "#!/bin/sh\necho hi\n"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dir/profile.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "name: url-distro\nimage: alpine:latest\nfiles:\n  - src: ./bootstrap.sh\n    dst: /opt/bootstrap.sh\n")
+	})
+	mux.HandleFunc("/dir/bootstrap.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("OCI_TO_WSL_PROFILE_FOLLOW_URL", "1")
+
+	p, err := config.LoadProfile(srv.URL + "/dir/profile.yaml")
+	if err != nil {
+		t.Fatalf("LoadProfile(url): unexpected error: %v", err)
+	}
+	if len(p.Files) != 1 {
+		t.Fatalf("Files length: got %d, want 1", len(p.Files))
+	}
+	if p.Files[0].Src != "" {
+		t.Errorf("Files[0].Src: got %q, want empty (downloaded)", p.Files[0].Src)
+	}
+	if err := p.Files[0].Validate(); err != nil {
+		t.Fatalf("Files[0].Validate: %v", err)
+	}
+	if got := string(p.Files[0].DecodedContentBase64()); got != body {
+		t.Errorf("Files[0] content: got %q, want %q", got, body)
+	}
+}
+
+func TestLoadProfile_FromURLDefaultDoesNotFollow(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dir/profile.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "name: url-distro\nimage: alpine:latest\nfiles:\n  - src: ./bootstrap.sh\n    dst: /opt/bootstrap.sh\n")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Without OCI_TO_WSL_PROFILE_FOLLOW_URL set, the relative src must be
+	// resolved on the local filesystem (current working directory), not
+	// downloaded over the network.
+	p, err := config.LoadProfile(srv.URL + "/dir/profile.yaml")
+	if err != nil {
+		t.Fatalf("LoadProfile(url): unexpected error: %v", err)
+	}
+	if len(p.Files) != 1 {
+		t.Fatalf("Files length: got %d, want 1", len(p.Files))
+	}
+	if p.Files[0].ContentBase64 != nil {
+		t.Errorf("Files[0].ContentBase64: got non-nil, want nil (no network follow)")
+	}
+	if !filepath.IsAbs(p.Files[0].Src) {
+		t.Errorf("Files[0].Src not absolute local path: %q", p.Files[0].Src)
+	}
+	if filepath.Base(p.Files[0].Src) != "bootstrap.sh" {
+		t.Errorf("Files[0].Src base: got %q, want bootstrap.sh", p.Files[0].Src)
+	}
+}
+
+func TestLoadProfile_FromURLRejectsAbsoluteURLSrc(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dir/profile.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "name: n\nimage: i\nfiles:\n  - src: http://169.254.169.254/latest/meta-data\n    dst: /opt/x\n")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("OCI_TO_WSL_PROFILE_FOLLOW_URL", "1")
+
+	if _, err := config.LoadProfile(srv.URL + "/dir/profile.yaml"); err == nil {
+		t.Fatal("expected error for absolute-URL src, got nil")
+	}
+}
+
+func TestLoadProfile_FromURLRejectsParentEscape(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dir/profile.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "name: n\nimage: i\nfiles:\n  - src: ../secret.sh\n    dst: /opt/x\n")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("OCI_TO_WSL_PROFILE_FOLLOW_URL", "1")
+
+	if _, err := config.LoadProfile(srv.URL + "/dir/profile.yaml"); err == nil {
+		t.Fatal("expected error for parent-directory-escaping src, got nil")
+	}
+}
+
+func TestLoadProfile_FromURLRejectsCrossSchemeRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dir/profile.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "name: url-distro\nimage: alpine:latest\nfiles:\n  - src: ./bootstrap.sh\n    dst: /opt/bootstrap.sh\n")
+	})
+	mux.HandleFunc("/dir/bootstrap.sh", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://"+r.Host+"/dir/bootstrap-https.sh", http.StatusFound)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("OCI_TO_WSL_PROFILE_FOLLOW_URL", "1")
+
+	if _, err := config.LoadProfile(srv.URL + "/dir/profile.yaml"); err == nil {
+		t.Fatal("expected error for cross-scheme redirect, got nil")
+	} else if !strings.Contains(err.Error(), "cross-scheme redirect") {
+		t.Fatalf("error = %v, want cross-scheme redirect", err)
+	}
+}
+
+func TestLoadProfile_FromStdinHonorsMaxProfileSizeEnv(t *testing.T) {
+	t.Setenv("OCI_TO_WSL_MAX_PROFILE_SIZE", "16")
+	yaml := "name: stdin-distro\nimage: alpine:latest\n"
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(yaml); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+
+	orig := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = orig; _ = r.Close() }()
+
+	if _, err := config.LoadProfile("-"); err == nil {
+		t.Fatal("expected size-limit error, got nil")
+	} else if !strings.Contains(err.Error(), "profile exceeds maximum size") {
+		t.Fatalf("error = %v, want size-limit message", err)
 	}
 }
 

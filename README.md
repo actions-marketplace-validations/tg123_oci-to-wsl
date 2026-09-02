@@ -28,6 +28,16 @@ oci-to-wsl.exe --image myacr.azurecr.io/myimage:latest --name myimage
 
 # Using a YAML profile
 oci-to-wsl.exe --profile ubuntu.yaml
+
+# Read a profile from stdin (like `kubectl apply -f -`)
+cat ubuntu.yaml | oci-to-wsl.exe --profile -
+
+# Fetch a profile over the network
+oci-to-wsl.exe --profile https://example.com/ubuntu.yaml
+
+# Opt in to also downloading the profile's relative `files` sources from the
+# same URL (off by default; see the YAML profile section below)
+$env:OCI_TO_WSL_PROFILE_FOLLOW_URL=1; oci-to-wsl.exe --profile https://example.com/ubuntu.yaml
 ```
 
 ## Image sources
@@ -127,9 +137,14 @@ files:                           # optional – injected into the rootfs tar so 
   - src: ./scripts/bootstrap.sh  # relative paths resolve to the profile's directory
     dst: /usr/local/bin/bootstrap.sh
     mode: "0755"                 # optional – octal, e.g. "0755" or "777"
+    sha1: da39a3ee5e6b4b0d3255bfef95601890afd80709  # optional – 40-char hex digest the staged bytes must match (any src)
   - src: C:\Users\me\assets      # native Windows paths are accepted
     dst: /opt/assets
     replace: false               # optional – default true; false overlays onto the upstream tree instead of replacing it
+  - src: https://example.com/tools/installer.sh  # http:// / https:// URLs are downloaded at staging time
+    dst: /usr/local/bin/installer.sh
+    mode: "0755"
+    sha1: da39a3ee5e6b4b0d3255bfef95601890afd80709  # optional – 40-char hex digest the staged bytes must match (any src)
   - src: '%USERPROFILE%\.gitconfig'  # %VAR%, $VAR / ${VAR} and a leading ~ are expanded in `src`
     dst: '/home/%USERNAME%/.gitconfig' # `dst` accepts the same %VAR% / $VAR / ${VAR} expansion as `src`
   - dst: /etc/motd               # inline UTF-8 body in place of 'src'
@@ -173,6 +188,24 @@ init_cmds:                       # optional – run inside the new distro after 
 ```
 
 See [`example-profile.yaml`](example-profile.yaml) for a complete example.
+
+When the profile is loaded from a `-`/stdin or an `http(s)://` URL there is no
+enclosing directory, so relative `files[].src` paths resolve against the
+current working directory. For URL profiles you can instead opt in to
+downloading those relative sources from the **same URL** by setting
+`OCI_TO_WSL_PROFILE_FOLLOW_URL=1` (also accepts `true`/`True`/`TRUE`/`t`):
+
+```powershell
+$env:OCI_TO_WSL_PROFILE_FOLLOW_URL = '1'
+oci-to-wsl.exe --profile https://example.com/profiles/ubuntu.yaml
+```
+
+This is **off by default** because it widens the trust placed in the remote
+profile. When enabled, fetched file references are constrained for safety:
+each `src` must be a relative path that stays on the **same scheme and host**
+as the profile URL and **within the profile's directory** (no absolute URLs,
+no `../` escapes), and cross-host redirects are refused. Downloaded files are size-limited like the profile itself (default 1 MiB;
+override via `OCI_TO_WSL_MAX_PROFILE_SIZE` in bytes).
 
 ## GitHub Action
 
@@ -224,7 +257,7 @@ jobs:
 |---|---|
 | `image` | OCI image reference to import (ignored when `profile` is set) |
 | `name` | WSL distribution name (required unless the profile sets it or `save-tar` is used) |
-| `profile` | Path to a YAML profile file; overrides `image`/`name`/`dir` when set |
+| `profile` | Path to a YAML profile file (or `-` for stdin / `http(s)://` URL); overrides `image`/`name`/`dir` when set |
 | `dir` | Directory to store the WSL virtual disk (default: `.\<name>`) |
 | `save-tar` | Write the rootfs tar to this path and skip `wsl --import` |
 | `loglevel` | Logging verbosity: `debug`, `info` (default), `warn`, or `error` |
@@ -295,7 +328,7 @@ No credentials are stored on disk by this tool.
 
 | Flag | Description |
 |---|---|
-| `--profile <path>` | Path to a YAML profile file |
+| `--profile <path>` | Path to a YAML profile file. Use `-` to read from stdin or an `http(s)://` URL to fetch one over the network (like `kubectl apply -f`) |
 | `--image <ref>` | OCI image reference (required without `--profile`) |
 | `--name <distro>` | WSL distribution name (required without `--profile`) |
 | `--dir <path>` | Directory to store the WSL virtual disk (default: `.\<name>`) |
